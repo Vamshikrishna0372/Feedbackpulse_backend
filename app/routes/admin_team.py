@@ -1,7 +1,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import datetime, timezone
 from bson import ObjectId
 
@@ -52,6 +52,14 @@ class TeamMetrics(BaseModel):
     onlineNow: int
     avgResponseRate: float
     totalReviews: int
+    
+class PaginatedTeamResponse(BaseModel):
+    items: List[TeamMemberResponse]
+    total: int
+    page: int
+    limit: int
+    pages: int
+
 
 # --- Helper ---
 def map_team_member(user: dict) -> dict:
@@ -82,9 +90,11 @@ async def get_platform_admin(current_user: dict = Depends(get_current_user)):
 
 # --- Endpoints ---
 
-@router.get("/", response_model=List[TeamMemberResponse])
+@router.get("/", response_model=Union[List[TeamMemberResponse], PaginatedTeamResponse])
 async def list_company_team_as_admin(
     company_id: str = Query(..., description="Company ID is required for admin view"),
+    page: Optional[int] = Query(None, ge=1, description="Page number"),
+    limit: int = Query(100, ge=1, le=500),
     current_user: dict = Depends(get_platform_admin)
 ):
     """
@@ -95,12 +105,27 @@ async def list_company_team_as_admin(
     if not ObjectId.is_valid(company_id):
         raise HTTPException(status_code=400, detail="Invalid Company ID")
 
+    match_stage = {
+        "companyId": ObjectId(company_id),
+        "isActive": True,
+        "role": {"$in": COMPANY_ROLES}
+    }
+    
+    if page is not None:
+         total_count = await db["users"].count_documents(match_stage)
+    
     pipeline = [
-        {"$match": {
-            "companyId": ObjectId(company_id),
-            "isActive": True,
-            "role": {"$in": COMPANY_ROLES}
-        }},
+        {"$match": match_stage},
+        {"$sort": {"createdAt": -1}},
+    ]
+    
+    if page is not None:
+         pipeline.append({"$skip": (page - 1) * limit})
+         pipeline.append({"$limit": limit})
+    else:
+         pipeline.append({"$limit": 100})
+
+    pipeline.extend([
         {
             "$lookup": {
                 "from": "feedbackReplies",
@@ -117,13 +142,24 @@ async def list_company_team_as_admin(
                 "reviewsAssigned": 0,
                 "avgResponseTime": "N/A"
             }
-        },
-        {"$sort": {"createdAt": -1}},
-        {"$limit": 100}
-    ]
+        }
+    ])
     
-    users = await db["users"].aggregate(pipeline).to_list(100)
-    return [map_team_member(u) for u in users]
+    limit_val = limit if page else 100
+    users = await db["users"].aggregate(pipeline).to_list(limit_val)
+    mapped_users = [map_team_member(u) for u in users]
+    
+    if page is not None:
+        import math
+        return PaginatedTeamResponse(
+            items=mapped_users,
+            total=total_count,
+            page=page,
+            limit=limit,
+            pages=math.ceil(total_count / limit) if limit > 0 else 0
+        )
+        
+    return mapped_users
 
 
 @router.get("/metrics", response_model=TeamMetrics)

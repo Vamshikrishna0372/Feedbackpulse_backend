@@ -1,7 +1,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import datetime, timezone
 from bson import ObjectId
 import re
@@ -28,6 +28,14 @@ class CompanyUpdate(BaseModel):
     logo: Optional[str] = None
     status: Optional[str] = None
 
+class PaginatedCompanyResponse(BaseModel):
+    items: List[dict]
+    total: int
+    page: int
+    limit: int
+    pages: int
+
+
 # --- Helpers ---
 def slugify(text: str) -> str:
     text = text.lower().strip()
@@ -51,15 +59,34 @@ def map_company(c: dict) -> dict:
 
 # --- Endpoints ---
 
-@router.get("/")
+@router.get("/", response_model=Union[List[dict], PaginatedCompanyResponse])
 async def list_companies(
+    page: Optional[int] = Query(None, ge=1, description="Page number"),
     limit: int = Query(100, ge=1, le=500),
 ):
     """
-    List all companies.
+    List all companies. With optional pagination.
     """
     db = await get_database()
-    companies = await db["companies"].find().sort("name", 1).limit(limit).to_list(limit)
+    
+    query = {} 
+    # Add filtering if needed, currently none 
+
+    if page is not None:
+        total = await db["companies"].count_documents(query)
+        companies = await db["companies"].find(query).sort("name", 1).skip((page - 1) * limit).limit(limit).to_list(limit)
+        
+        import math
+        return PaginatedCompanyResponse(
+            items=[map_company(c) for c in companies],
+            total=total,
+            page=page,
+            limit=limit,
+            pages=math.ceil(total / limit) if limit > 0 else 0
+        )
+    
+    # Backward compatibility
+    companies = await db["companies"].find(query).sort("name", 1).limit(limit).to_list(limit)
     return [map_company(c) for c in companies]
 
 
@@ -104,6 +131,7 @@ async def create_company(
     slug = company_in.slug if company_in.slug else slugify(company_in.name)
     
     # Check for duplicate slug
+    existing_company = await db["companies"].find_one({"slug": slug})
     if existing_company:
         raise HTTPException(
             status_code=400, 

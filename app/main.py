@@ -58,13 +58,13 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     error_msg = exc.errors()[0].get('msg', 'Invalid input')
     field = exc.errors()[0].get('loc', ['unknown'])[-1]
-    return JSONResponse(status_code=422, content={"error": f"{field}: {error_msg}"})
+    return JSONResponse(status_code=422, content={"detail": f"{field}: {error_msg}"})
 
 # --- Request Logging Middleware ---
 @app.middleware("http")

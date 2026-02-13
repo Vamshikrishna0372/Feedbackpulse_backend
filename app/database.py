@@ -47,12 +47,19 @@ class Database:
             await self.db["companies"].create_index("slug", unique=True)
             await self.db["companies"].create_index("name")
             
-            # Users: unique email
+            # Users: unique email, role, companyId
             await self.db["users"].create_index("email", unique=True)
             await self.db["users"].create_index("companyId")
+            await self.db["users"].create_index("role")
             
             # Feedback: companyId, createdAt for sorting, status
-            await self.db["feedback"].create_index([("companyId", 1), ("createdAt", -1)])
+            # Compound index for main list view: companyId + isPinned (desc) + createdAt (desc)
+            await self.db["feedback"].create_index([("companyId", 1), ("isPinned", -1), ("createdAt", -1)])
+            # Compound for status filtering
+            await self.db["feedback"].create_index([("companyId", 1), ("status", 1)])
+            # Index for assigned tasks
+            await self.db["feedback"].create_index([("assignedTo", 1), ("status", 1)])
+            
             await self.db["feedback"].create_index("status")
             await self.db["feedback"].create_index("isDeleted")
             

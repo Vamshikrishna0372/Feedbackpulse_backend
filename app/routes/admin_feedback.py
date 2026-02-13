@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Union
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from bson import ObjectId
@@ -53,6 +53,14 @@ class FeedbackResponse(BaseModel):
 
 class StatusUpdate(BaseModel):
     status: str = Field(..., pattern="^(New|In Progress|Resolved|Closed)$")
+
+class PaginatedFeedbackResponse(BaseModel):
+    items: List[FeedbackResponse]
+    total: int
+    page: int
+    limit: int
+    pages: int
+
 
 # --- Helper to convert Mongo document to Pydantic model ---
 def map_feedback(feedback: dict) -> FeedbackResponse:
@@ -150,11 +158,13 @@ async def get_feedback_with_details(db, feedback_id: ObjectId, company_id: Objec
 
 # --- Routes ---
 
-@router.get("/feedback", response_model=List[FeedbackResponse])
+@router.get("/feedback", response_model=Union[List[FeedbackResponse], PaginatedFeedbackResponse])
 async def list_feedback(
     status: Optional[str] = Query(None, description="Filter by status"),
     rating: Optional[int] = Query(None, ge=1, le=5, description="Filter by rating"),
     category: Optional[str] = Query(None, description="Filter by category"),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
     current_admin: dict = Depends(get_current_admin)
 ):
     db = await get_database()
@@ -180,10 +190,28 @@ async def list_feedback(
     if category:
         match_stage["category"] = category
 
+    # Optimization: Sort first
+    sort_stage = {"$sort": {"isPinned": -1, "createdAt": -1}}
+
+    # Base pipeline for data
     pipeline = [
         {"$match": match_stage},
-        # Proper sorting: Pinned first, then newest
-        {"$sort": {"isPinned": -1, "createdAt": -1}},
+        sort_stage
+    ]
+
+    # Handle Pagination
+    if page is not None:
+        total_count = await db["feedback"].count_documents(match_stage)
+        skip = (page - 1) * limit
+        pipeline.append({"$skip": skip})
+        pipeline.append({"$limit": limit})
+    else:
+        # Backward compatibility: limit 100
+        pipeline.append({"$limit": 100})
+
+    # Optimization: Lookups AFTER limit
+    # Only fetch details for the items we are actually returning
+    pipeline.extend([
         {
             "$lookup": {
                 "from": "feedbackReplies",
@@ -214,14 +242,25 @@ async def list_feedback(
                 "notes": {"$sortArray": {"input": "$notes", "sortBy": {"createdAt": 1}}},
                 "history": {"$sortArray": {"input": "$history", "sortBy": {"createdAt": 1}}}
             }
-        },
-        {"$limit": 100}
-    ]
+        }
+    ])
     
     cursor = db["feedback"].aggregate(pipeline)
-    feedbacks = await cursor.to_list(length=100)
+    feedbacks = await cursor.to_list(length=limit if page else 100)
     
-    return [map_feedback(f) for f in feedbacks]
+    mapped_feedbacks = [map_feedback(f) for f in feedbacks]
+
+    if page is not None:
+        import math
+        return PaginatedFeedbackResponse(
+            items=mapped_feedbacks,
+            total=total_count,
+            page=page,
+            limit=limit,
+            pages=math.ceil(total_count / limit) if limit > 0 else 0
+        )
+    
+    return mapped_feedbacks
 
 @router.patch("/feedback/{feedback_id}/status", response_model=FeedbackResponse)
 async def update_feedback_status(

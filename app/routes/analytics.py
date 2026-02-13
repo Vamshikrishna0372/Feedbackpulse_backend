@@ -1,5 +1,6 @@
+import time
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, List
+from typing import Dict, List, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime
 from bson import ObjectId
@@ -8,6 +9,22 @@ from app.database import get_database
 from app.auth.dependencies import get_current_admin
 
 router = APIRouter(prefix="/admin/analytics", tags=["Admin Analytics"])
+
+# --- Caching ---
+CACHE: Dict[str, Any] = {}
+CACHE_TTL = 60  # seconds
+
+def get_cache_key(prefix: str, identifier: str) -> str:
+    return f"{prefix}:{identifier}"
+
+def get_from_cache(key: str) -> Optional[Any]:
+    entry = CACHE.get(key)
+    if entry and time.time() - entry["timestamp"] < CACHE_TTL:
+        return entry["data"]
+    return None
+
+def set_cache(key: str, data: Any):
+    CACHE[key] = {"data": data, "timestamp": time.time()}
 
 # --- Models ---
 class TimelineItem(BaseModel):
@@ -31,7 +48,14 @@ def get_match_stage(current_admin: dict):
 async def get_rating_distribution(current_admin: dict = Depends(get_current_admin)):
     """
     Get the count of feedback for each rating (1-5).
+    Cached.
     """
+    user_id = str(current_admin["userId"])
+    cache_key = get_cache_key("ratings", user_id)
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     db = await get_database()
     match_stage = get_match_stage(current_admin)
     if match_stage is None:
@@ -43,7 +67,6 @@ async def get_rating_distribution(current_admin: dict = Depends(get_current_admi
         {"$sort": {"_id": 1}}
     ]
 
-    
     cursor = db["feedback"].aggregate(pipeline)
     results = await cursor.to_list(length=None)
     
@@ -55,6 +78,7 @@ async def get_rating_distribution(current_admin: dict = Depends(get_current_admi
         if rating in distribution:
             distribution[rating] = item["count"]
             
+    set_cache(cache_key, distribution)
     return distribution
 
 
@@ -62,7 +86,14 @@ async def get_rating_distribution(current_admin: dict = Depends(get_current_admi
 async def get_category_distribution(current_admin: dict = Depends(get_current_admin)):
     """
     Get the count of feedback per category.
+    Cached.
     """
+    user_id = str(current_admin["userId"])
+    cache_key = get_cache_key("categories", user_id)
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     db = await get_database()
     match_stage = get_match_stage(current_admin)
     if match_stage is None:
@@ -84,6 +115,7 @@ async def get_category_distribution(current_admin: dict = Depends(get_current_ad
         if category:
             distribution[category] = item["count"]
             
+    set_cache(cache_key, distribution)
     return distribution
 
 
@@ -92,24 +124,28 @@ async def get_feedback_timeline(current_admin: dict = Depends(get_current_admin)
     """
     Get feedback count grouped by date for trend analysis.
     Sorted by date ascending.
+    Cached.
     """
+    user_id = str(current_admin["userId"])
+    cache_key = get_cache_key("timeline", user_id)
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     db = await get_database()
     match_stage = get_match_stage(current_admin)
     if match_stage is None:
         return []
     
+    # Optimized pipeline: Merge project into group
     pipeline = [
         {"$match": match_stage},
-
-        {
-            "$project": {
-                # specific format %Y-%m-%d
-                "dateStr": {
-                    "$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}
-                }
-            }
-        },
-        {"$group": {"_id": "$dateStr", "count": {"$sum": 1}}},
+        {"$group": {
+            "_id": {
+                "$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}
+            },
+            "count": {"$sum": 1}
+        }},
         {"$sort": {"_id": 1}} # Sort by date ascending
     ]
     
@@ -120,4 +156,5 @@ async def get_feedback_timeline(current_admin: dict = Depends(get_current_admin)
     for item in results:
         timeline.append(TimelineItem(date=item["_id"], count=item["count"]))
         
+    set_cache(cache_key, timeline)
     return timeline
