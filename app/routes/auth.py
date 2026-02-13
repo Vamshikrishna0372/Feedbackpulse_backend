@@ -30,11 +30,21 @@ async def login_for_access_token(form_data: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
         
-    # 2. Check Role
-    if user.get("role") not in ["main_admin", "sub_admin", "admin"]:
+    # 2. Check Role (Allow Platform Admins and Company Staff)
+    allowed_roles = [
+        "super_admin", "main_admin", "sub_admin", "admin", # Platform
+        "company_admin", "company_manager", "company_analyst" # Company
+    ]
+    if user.get("role") not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access forbidden: Admins only",
+            detail="Access forbidden: Insufficient permissions",
+        )
+    
+    if not user.get("isActive", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
         )
         
     # 3. Create Access Token

@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from datetime import datetime, timezone
@@ -9,14 +9,11 @@ from app.database import get_database
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import get_password_hash
 
-# Tag as Admin Team Management - Platform level managing Company Teams
-router = APIRouter(prefix="/admin/team", tags=["Admin Team Management"])
+# PREFIX: /company/team
+# AUDIENCE: Company Admins, Managers, Analysts ONLY
+router = APIRouter(prefix="/company/team", tags=["Company Team"])
 
 # --- Constants ---
-ROLE_SUPER_ADMIN = "super_admin"
-ROLE_SUB_ADMIN = "sub_admin"
-PLATFORM_ROLES = [ROLE_SUPER_ADMIN, ROLE_SUB_ADMIN]
-
 ROLE_COMPANY_ADMIN = "company_admin"
 ROLE_COMPANY_MANAGER = "company_manager"
 ROLE_COMPANY_ANALYST = "company_analyst"
@@ -40,9 +37,9 @@ class TeamMemberResponse(BaseModel):
 class InviteTeamMember(BaseModel):
     fullName: str
     email: EmailStr
-    role: str
+    role: str 
     password: Optional[str] = None
-    companyId: str # Required for Platform Admin
+    # No companyId here - determined from JWT
 
 class UpdateTeamRole(BaseModel):
     role: str
@@ -53,7 +50,7 @@ class TeamMetrics(BaseModel):
     avgResponseRate: float
     totalReviews: int
 
-# --- Helper ---
+# --- Helpers ---
 def map_team_member(user: dict) -> dict:
     return {
         "id": str(user["_id"]),
@@ -70,34 +67,44 @@ def map_team_member(user: dict) -> dict:
         "avgResponseTime": user.get("avgResponseTime", "N/A"),
     }
 
-# --- Dependency ---
-async def get_platform_admin(current_user: dict = Depends(get_current_user)):
+# --- Dependencies ---
+async def get_company_user(current_user: dict = Depends(get_current_user)):
+    """
+    STRICT: Only allow Company Roles.
+    Block super_admin, sub_admin.
+    """
     role = current_user.get("role", "")
-    if role not in PLATFORM_ROLES and role != "main_admin":
+    if role not in COMPANY_ROLES:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Access restricted to Platform Admins"
+            status_code=403, 
+            detail="Access restricted to Company members. Platform Admins must use Admin Console."
         )
+    
+    if not current_user.get("companyId"):
+        raise HTTPException(status_code=403, detail="User not associated with any company")
+        
     return current_user
+
+def check_write_permission(user_role: str):
+    if user_role in [ROLE_COMPANY_MANAGER, ROLE_COMPANY_ANALYST]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions to manage team")
 
 # --- Endpoints ---
 
 @router.get("/", response_model=List[TeamMemberResponse])
-async def list_company_team_as_admin(
-    company_id: str = Query(..., description="Company ID is required for admin view"),
-    current_user: dict = Depends(get_platform_admin)
+async def list_company_team(
+    current_user: dict = Depends(get_company_user)
 ):
     """
-    Platform Admins: List team members of a specific company.
+    Show ONLY company-level users for the current user's company.
     """
     db = await get_database()
     
-    if not ObjectId.is_valid(company_id):
-        raise HTTPException(status_code=400, detail="Invalid Company ID")
+    company_id = ObjectId(current_user["companyId"])
 
     pipeline = [
         {"$match": {
-            "companyId": ObjectId(company_id),
+            "companyId": company_id,
             "isActive": True,
             "role": {"$in": COMPANY_ROLES}
         }},
@@ -114,7 +121,7 @@ async def list_company_team_as_admin(
         {
             "$addFields": {
                 "reviewsReplied": {"$size": "$replies"},
-                "reviewsAssigned": 0,
+                "reviewsAssigned": 0, # Placeholder until assignment logic exists
                 "avgResponseTime": "N/A"
             }
         },
@@ -127,24 +134,18 @@ async def list_company_team_as_admin(
 
 
 @router.get("/metrics", response_model=TeamMetrics)
-async def get_team_metrics_as_admin(
-    company_id: str = Query(..., description="Company ID is required"),
-    current_user: dict = Depends(get_platform_admin)
-):
+async def get_team_metrics(current_user: dict = Depends(get_company_user)):
     db = await get_database()
+    company_id = ObjectId(current_user["companyId"])
     
-    if not ObjectId.is_valid(company_id):
-        return {"totalMembers": 0, "onlineNow": 0, "avgResponseRate": 0.0, "totalReviews": 0}
-
     # 1. Member Stats
-    cid = ObjectId(company_id)
-    query_base = {"companyId": cid, "isActive": True, "role": {"$in": COMPANY_ROLES}}
-    
+    query_base = {"companyId": company_id, "isActive": True, "role": {"$in": COMPANY_ROLES}}
     total_members = await db["users"].count_documents(query_base)
-    users = await db["users"].find(query_base).to_list(100)
     
-    online_now = 0
+    # Online Now logic
     now = datetime.now(timezone.utc)
+    users = await db["users"].find(query_base).to_list(100)
+    online_now = 0
     for u in users:
         last_login = u.get("lastLogin")
         if last_login:
@@ -154,14 +155,16 @@ async def get_team_metrics_as_admin(
                 online_now += 1
 
     # 2. Feedback Stats
-    total_feedback = await db["feedback"].count_documents({"companyId": cid})
+    total_feedback = await db["feedback"].count_documents({"companyId": company_id})
     
+    # Handled = Status != New
     handled_feedback = await db["feedback"].count_documents({
-        "companyId": cid, 
+        "companyId": company_id, 
         "status": {"$ne": "New"}
     })
     
-    replied_ids = await db["feedbackReplies"].distinct("feedbackId", {"companyId": cid})
+    # Replied Count (approximation for Response Rate)
+    replied_ids = await db["feedbackReplies"].distinct("feedbackId", {"companyId": company_id})
     replied_count = len(replied_ids)
     
     avg_rate = (replied_count / total_feedback * 100) if total_feedback > 0 else 0.0
@@ -175,36 +178,34 @@ async def get_team_metrics_as_admin(
 
 
 @router.post("/", response_model=TeamMemberResponse)
-async def invite_member_as_admin(
+async def invite_team_member(
     invite: InviteTeamMember,
-    current_user: dict = Depends(get_platform_admin)
+    current_user: dict = Depends(get_company_user)
 ):
     db = await get_database()
+    creator_role = current_user.get("role")
     
-    if invite.role not in COMPANY_ROLES:
-        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of {COMPANY_ROLES}")
+    check_write_permission(creator_role)
     
-    if not invite.companyId:
-        raise HTTPException(status_code=400, detail="Company ID required")
+    # Restrict creation rules
+    if creator_role == ROLE_COMPANY_ADMIN:
+        if invite.role == ROLE_COMPANY_ADMIN:
+             raise HTTPException(status_code=403, detail="Company Admin cannot create another Company Admin")
+        if invite.role not in [ROLE_COMPANY_MANAGER, ROLE_COMPANY_ANALYST]:
+             raise HTTPException(status_code=403, detail="Invalid role for Company Admin to create")
+    
+    target_company_id = ObjectId(current_user["companyId"])
 
-    # Verify Company
-    company = await db["companies"].find_one({"_id": ObjectId(invite.companyId)})
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
-
-    # Check Email
     existing = await db["users"].find_one({"email": invite.email})
     if existing:
         raise HTTPException(status_code=400, detail="User with this email already exists")
 
-    password = invite.password or "Welcome123!"
-    
     new_user = {
         "fullName": invite.fullName,
         "email": invite.email,
-        "passwordHash": get_password_hash(password),
+        "passwordHash": get_password_hash(invite.password or "Welcome123!"),
         "role": invite.role,
-        "companyId": ObjectId(invite.companyId),
+        "companyId": target_company_id,
         "isActive": True,
         "reviewsCount": 0,
         "responseRate": 0.0,
@@ -220,49 +221,56 @@ async def invite_member_as_admin(
 
 
 @router.patch("/{member_id}/role", response_model=TeamMemberResponse)
-async def update_role_as_admin(
+async def update_member_role(
     member_id: str,
     update: UpdateTeamRole,
-    current_user: dict = Depends(get_platform_admin)
+    current_user: dict = Depends(get_company_user)
 ):
-    """
-    Platform admins can update any company user's role.
-    """
     db = await get_database()
+    updater_role = current_user.get("role")
+    check_write_permission(updater_role)
     
+    if update.role == ROLE_COMPANY_ADMIN:
+         raise HTTPException(status_code=403, detail="Cannot promote to Company Admin")
     if update.role not in COMPANY_ROLES:
-         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of {COMPANY_ROLES}")
+         raise HTTPException(status_code=400, detail="Invalid role")
 
     target_user = await db["users"].find_one({"_id": ObjectId(member_id)})
     if not target_user:
         raise HTTPException(status_code=404, detail="Member not found")
         
-    # Ensure target is a company user, not another super_admin
-    if target_user.get("role") not in COMPANY_ROLES:
-         raise HTTPException(status_code=403, detail="Cannot edit non-company roles via this endpoint")
+    if str(target_user.get("companyId")) != str(current_user["companyId"]):
+        raise HTTPException(status_code=404, detail="Member not found")
+        
+    if str(target_user["_id"]) == str(current_user["_id"]):
+         raise HTTPException(status_code=400, detail="Cannot change your own role")
 
     updated = await db["users"].find_one_and_update(
         {"_id": ObjectId(member_id)},
         {"$set": {"role": update.role, "updatedAt": datetime.now(timezone.utc)}},
         return_document=True
     )
-    
     return map_team_member(updated)
 
 
 @router.patch("/{member_id}/deactivate", response_model=TeamMemberResponse)
-async def deactivate_member_as_admin(
+async def deactivate_member(
     member_id: str,
-    current_user: dict = Depends(get_platform_admin)
+    current_user: dict = Depends(get_company_user)
 ):
     db = await get_database()
+    updater_role = current_user.get("role")
+    check_write_permission(updater_role)
     
     target_user = await db["users"].find_one({"_id": ObjectId(member_id)})
     if not target_user:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    if target_user.get("role") not in COMPANY_ROLES:
-         raise HTTPException(status_code=403, detail="Cannot edit non-company roles via this endpoint")
+    if str(target_user.get("companyId")) != str(current_user["companyId"]):
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    if str(target_user["_id"]) == str(current_user["_id"]):
+         raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
 
     new_state = not target_user.get("isActive", True)
     
@@ -271,24 +279,31 @@ async def deactivate_member_as_admin(
         {"$set": {"isActive": new_state, "updatedAt": datetime.now(timezone.utc)}},
         return_document=True
     )
-    
     return map_team_member(updated)
 
 
 @router.delete("/{member_id}")
-async def delete_member_as_admin(
+async def delete_member(
     member_id: str,
-    current_user: dict = Depends(get_platform_admin)
+    current_user: dict = Depends(get_company_user)
 ):
     db = await get_database()
+    updater_role = current_user.get("role")
+    check_write_permission(updater_role)
     
     target_user = await db["users"].find_one({"_id": ObjectId(member_id)})
     if not target_user:
         raise HTTPException(status_code=404, detail="Member not found")
-        
-    if target_user.get("role") not in COMPANY_ROLES:
-         raise HTTPException(status_code=403, detail="Cannot delete non-company roles via this endpoint")
 
+    if str(target_user.get("companyId")) != str(current_user["companyId"]):
+        raise HTTPException(status_code=404, detail="Member not found")
+        
+    if target_user.get("role") == ROLE_COMPANY_ADMIN:
+          raise HTTPException(status_code=403, detail="Cannot delete a Company Admin")
+          
+    if str(target_user["_id"]) == str(current_user["_id"]):
+         raise HTTPException(status_code=400, detail="Cannot delete yourself")
+         
     await db["users"].delete_one({"_id": ObjectId(member_id)})
     
     return {"message": "Member deleted successfully"}

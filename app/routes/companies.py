@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
@@ -17,6 +18,7 @@ class CompanyCreate(BaseModel):
     website: Optional[str] = None
     description: Optional[str] = None
     logo: Optional[str] = None
+    slug: Optional[str] = None
 
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
@@ -54,7 +56,7 @@ async def list_companies(
     limit: int = Query(100, ge=1, le=500),
 ):
     """
-    List all companies (public for feedback form, authenticated for admin).
+    List all companies.
     """
     db = await get_database()
     companies = await db["companies"].find().sort("name", 1).limit(limit).to_list(limit)
@@ -67,7 +69,7 @@ async def search_companies(
     limit: int = Query(10, ge=1, le=50),
 ):
     """
-    Search companies by name (used in feedback submission form).
+    Search companies by name.
     """
     db = await get_database()
     regex = {"$regex": query, "$options": "i"}
@@ -93,17 +95,22 @@ async def create_company(
     current_user: dict = Depends(get_current_admin)
 ):
     """
-    Create a new company.
+    Create a new company. Only company details are needed.
+    Admin users for the company can be added separately via team management.
     """
     db = await get_database()
     
-    slug = slugify(company_in.name)
+    # Use provided slug or generate from name
+    slug = company_in.slug if company_in.slug else slugify(company_in.name)
     
     # Check for duplicate slug
-    existing = await db["companies"].find_one({"slug": slug})
-    if existing:
-        raise HTTPException(status_code=400, detail="A company with a similar name already exists")
+    if existing_company:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"A company with this Unique ID (slug) already exists: {slug}. Please use a different name or edit the unique ID."
+        )
     
+    # Create Company
     new_company = {
         "name": company_in.name,
         "slug": slug,
@@ -116,8 +123,9 @@ async def create_company(
         "updatedAt": datetime.now(timezone.utc),
     }
     
-    result = await db["companies"].insert_one(new_company)
-    new_company["_id"] = result.inserted_id
+    company_result = await db["companies"].insert_one(new_company)
+    company_id = company_result.inserted_id
+    new_company["_id"] = company_id
     
     return map_company(new_company)
 
@@ -168,5 +176,11 @@ async def delete_company(
     result = await db["companies"].delete_one({"_id": ObjectId(company_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Company not found")
+        
+    # Deactivate users of this company
+    await db["users"].update_many(
+        {"companyId": ObjectId(company_id)},
+        {"$set": {"isActive": False}}
+    )
     
     return {"message": "Company deleted successfully"}

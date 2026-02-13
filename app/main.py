@@ -4,12 +4,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import db
@@ -27,6 +26,7 @@ from app.routes.admin_replies import router as admin_replies_router
 from app.routes.admin_notes import router as admin_notes_router
 from app.routes.admin_management import router as admin_management_router
 from app.routes.user import router as user_router
+from app.routes.company_team import router as company_team_router
 
 # Track startup time for uptime calculation
 START_TIME = time.time()
@@ -52,56 +52,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
-# --- CORS Configuration ---
-if settings.ENVIRONMENT == "development":
-    # In development, allow ALL origins to avoid CORS issues with
-    # different ports (8080, 8081, 5173) and LAN IPs (192.168.x.x)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|0\.0\.0\.0)(:\d+)?",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
-else:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.ALLOWED_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
-
-# --- Request Logging Middleware ---
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    # Skip logging for OPTIONS to avoid mixing with CORS preflight logic
-    if request.method == "OPTIONS":
-        return await call_next(request)
-        
-    start_time = time.time()
-    try:
-        response = await call_next(request)
-        duration = time.time() - start_time
-        
-        log_msg = f"{request.method} {request.url.path} - {response.status_code} - {duration:.4f}s"
-        
-        if 200 <= response.status_code < 400:
-            logger.info(log_msg)
-        elif 400 <= response.status_code < 500:
-            logger.warning(log_msg)
-        else:
-            logger.error(log_msg)
-            
-        return response
-    except Exception as e:
-        duration = time.time() - start_time
-        logger.error(f"Request failed: {request.method} {request.url.path} - Error: {str(e)} - {duration:.4f}s")
-        raise e
-
-
 # --- Exception Handlers ---
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -116,28 +66,65 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     field = exc.errors()[0].get('loc', ['unknown'])[-1]
     return JSONResponse(status_code=422, content={"error": f"{field}: {error_msg}"})
 
+# --- Request Logging Middleware ---
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+        
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        duration = time.time() - start_time
+        log_msg = f"{request.method} {request.url.path} - {response.status_code} - {duration:.4f}s"
+        if 200 <= response.status_code < 400:
+            logger.info(log_msg)
+        else:
+            logger.warning(log_msg)
+        return response
+    except Exception as e:
+        logger.error(f"Request failed: {request.method} {request.url.path} - Error: {str(e)}")
+        raise e
+
 # --- Routes ---
 @app.get("/health")
 @limiter.exempt 
 async def health_check():
     db_status = await db.ping()
-    uptime_seconds = int(time.time() - START_TIME)
     return {
         "status": "healthy" if db_status else "unhealthy",
-        "uptime_seconds": uptime_seconds,
+        "uptime_seconds": int(time.time() - START_TIME),
         "database": "connected" if db_status else "disconnected"
     }
 
 app.include_router(feedback_router, prefix="/feedback", tags=["Feedback"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(companies_router, prefix="/companies", tags=["Companies"])
-app.include_router(admin_feedback_router, tags=["Admin Feedback"]) # Already has prefix in router
+app.include_router(admin_feedback_router, tags=["Admin Feedback"])
 app.include_router(admin_replies_router, prefix="/admin/replies", tags=["Admin Replies"])
 app.include_router(admin_notes_router, prefix="/admin/notes", tags=["Admin Notes"])
-app.include_router(admin_dashboard_router, tags=["Admin Dashboard"]) # Has prefix
-app.include_router(analytics_router, tags=["Admin Analytics"]) # Has prefix
-app.include_router(admin_profile_router, tags=["Admin Profile"]) # Has prefix
-app.include_router(admin_settings_router, tags=["Admin Settings"]) # Has prefix
-app.include_router(admin_team_router, tags=["Admin Team"]) # Has prefix
+app.include_router(admin_dashboard_router, tags=["Admin Dashboard"])
+app.include_router(analytics_router, tags=["Admin Analytics"])
+app.include_router(admin_team_router, tags=["Admin Team"])
 app.include_router(admin_management_router)
 app.include_router(user_router)
+app.include_router(company_team_router)
+app.include_router(admin_profile_router, tags=["Admin Profile"])
+app.include_router(admin_settings_router, tags=["Admin Settings"])
+
+# --- CORS Configuration (ADDED LAST to be OUTERMOST) ---
+origins = [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+] + settings.ALLOWED_ORIGINS
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins if settings.ENVIRONMENT == "development" else settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)

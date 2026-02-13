@@ -38,10 +38,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 async def get_current_admin(current_user: dict = Depends(get_current_user)):
     """
-    Dependency that ensures the authenticated user has the 'admin' role.
+    Dependency that ensures the authenticated user is either a Platform Admin 
+    or a Company Staff member (Admin, Manager, Analyst).
     """
     role = current_user.get("role")
-    if role not in ["main_admin", "sub_admin", "admin"]: # "admin" for backward compatibility if needed, but we should migrate
+    allowed_roles = [
+        "super_admin", "main_admin", "sub_admin", "admin",
+        "company_admin", "company_manager", "company_analyst"
+    ]
+    if role not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Admin access only"
@@ -56,5 +61,54 @@ async def get_current_main_admin(current_user: dict = Depends(get_current_user))
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Main Admin access only"
+        )
+    return current_user
+
+
+# === Role-specific guards for company roles ===
+
+async def get_company_admin_or_above(current_user: dict = Depends(get_current_user)):
+    """
+    Only company_admin or platform admins can access.
+    Blocks company_manager and company_analyst.
+    """
+    role = current_user.get("role")
+    allowed = ["super_admin", "main_admin", "sub_admin", "admin", "company_admin"]
+    if role not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Company Admin or Platform Admin access required"
+        )
+    return current_user
+
+
+async def get_company_manager_or_above(current_user: dict = Depends(get_current_user)):
+    """
+    company_manager, company_admin, or platform admins can access.
+    Blocks company_analyst.
+    """
+    role = current_user.get("role")
+    allowed = ["super_admin", "main_admin", "sub_admin", "admin", "company_admin", "company_manager"]
+    if role not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Manager or above access required"
+        )
+    return current_user
+
+
+async def get_company_analyst_or_above(current_user: dict = Depends(get_current_user)):
+    """
+    Any company role or platform admin can access (read-only analytics).
+    """
+    role = current_user.get("role")
+    allowed = [
+        "super_admin", "main_admin", "sub_admin", "admin",
+        "company_admin", "company_manager", "company_analyst"
+    ]
+    if role not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Analyst or above access required"
         )
     return current_user

@@ -18,7 +18,10 @@ async def authenticate_user(email: str, password: str):
         print("Login Error: database is None")
         return False
 
-    user = await database["users"].find_one({"email": email})
+    # Normalize email to check case-insensitively
+    user = await database["users"].find_one({
+        "email": {"$regex": f"^{email}$", "$options": "i"}
+    })
     
     if not user:
         print(f"Login Error: User not found for {email}")
@@ -33,5 +36,16 @@ async def authenticate_user(email: str, password: str):
     if not is_valid:
         print(f"Login Error: Password mismatch for {email}")
         return False
+        
+    if not user.get("isActive", True):
+        print(f"Login Error: Account deactivated for {email}")
+        return False
+        
+    # Update last login time
+    from datetime import datetime, timezone
+    await database["users"].update_one(
+        {"_id": user["_id"]},
+        {"$set": {"lastLogin": datetime.now(timezone.utc)}}
+    )
         
     return user

@@ -33,7 +33,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         # Default settings if none found
         return SettingsResponse(
             userId=user_id, 
-            companyId=current_user["companyId"],
+            companyId=current_user.get("companyId", ""),
             theme="light", 
             emailNotifications=True,
             pushNotifications=False
@@ -41,7 +41,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         
     return SettingsResponse(
         userId=user_id,
-        companyId=str(settings["companyId"]),
+        companyId=str(settings.get("companyId", "")),
         theme=settings.get("theme", "light"),
         emailNotifications=settings.get("emailNotifications", True),
         pushNotifications=settings.get("pushNotifications", False)
@@ -62,21 +62,27 @@ async def update_settings(
     if not update_fields:
          raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Add companyId if inserting new
-    update_doc = { "$set": update_fields }
-    update_doc["$setOnInsert"] = {
-        "companyId": ObjectId(current_user["companyId"]),
-        "createdAt": ObjectId(current_user["companyId"]).generation_time # dummy, better use datetime.utcnow via upsert
-         # Actually mongo won't run setOnInsert logic perfectly with pydantic mix, let's simplify
-    }
-    
+    # Prepare update fields
+    company_id_str = current_user.get("companyId")
+    company_id_obj = None
+    if company_id_str and company_id_str != "None":
+        try:
+            company_id_obj = ObjectId(company_id_str)
+        except:
+            pass
+
     # Simple upsert
+    update_ops = {"$set": update_fields}
+    if company_id_obj:
+        update_ops["$setOnInsert"] = {"companyId": company_id_obj}
+
     updated_settings = await db["settings"].find_one_and_update(
         {"userId": user_id},
-        {"$set": update_fields, "$setOnInsert": {"companyId": ObjectId(current_user["companyId"])}},
+        update_ops,
         upsert=True,
         return_document=True
     )
+
     
     if not updated_settings:
         raise HTTPException(status_code=500, detail="Failed to update settings")
