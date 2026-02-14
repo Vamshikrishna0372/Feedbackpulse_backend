@@ -112,18 +112,23 @@ app.include_router(company_team_router)
 app.include_router(admin_profile_router, tags=["Admin Profile"])
 app.include_router(admin_settings_router, tags=["Admin Settings"])
 
-# --- CORS Configuration (ADDED LAST to be OUTERMOST) ---
+# --- CORS Configuration ---
 origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://feedbackpulse-bice.vercel.app",
-] + settings.ALLOWED_ORIGINS
+]
+
+# Ensure settings.ALLOWED_ORIGINS are included
+for origin in settings.ALLOWED_ORIGINS:
+    if origin not in origins:
+        origins.append(origin)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins if settings.ENVIRONMENT == "development" else settings.ALLOWED_ORIGINS,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
